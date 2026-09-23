@@ -12,12 +12,17 @@ MainActor.assumeIsolated {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+    private enum StorageKey {
+        static let onboardingVersion = "onboarding.version"
+    }
+
     private let keyboardState = KeyboardState()
     private let nativeWallpaperManager = NativeWallpaperManager()
     private var wallpaperController: WallpaperController!
     private var inputMonitor: InputMonitor!
     private var statusItem: NSStatusItem!
     private var amountMenuItem: NSMenuItem!
+    private var mouseAmountMenuItem: NSMenuItem!
     private var inputStatusMenuItem: NSMenuItem!
     private var incrementSummaryMenuItem: NSMenuItem!
     private var midnightResetMenuItem: NSMenuItem!
@@ -25,24 +30,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var randomRangeMenuItem: NSMenuItem!
     private var nativeWallpaperStatusMenuItem: NSMenuItem!
     private var nativeWallpaperStatus = "系统壁纸：准备设置"
+    private var onboardingController: OnboardingController?
+    private var desktopExperienceStarted = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        applyNativeWallpaper(showError: false)
-
         wallpaperController = WallpaperController(state: keyboardState)
-        wallpaperController.rebuildWindows()
-
         inputMonitor = InputMonitor(
             handler: { [weak self] keyCode, isDown, shouldCount in
                 self?.keyboardState.setKey(code: keyCode, isDown: isDown, shouldCount: shouldCount)
             },
-            mouseHandler: { [weak self] location in
-                self?.wallpaperController.handleGlobalMouseDown(at: location)
+            mouseHandler: { [weak self] location, buttonNumber in
+                self?.keyboardState.recordMouseClick()
+                if buttonNumber == 0 {
+                    self?.wallpaperController.handleGlobalMouseDown(at: location)
+                }
             }
         )
 
         configureStatusItem()
-        startInputMonitoring(requestPermission: true)
 
         NotificationCenter.default.addObserver(
             self,
@@ -50,6 +55,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             name: NSApplication.didChangeScreenParametersNotification,
             object: nil
         )
+
+        if UserDefaults.standard.integer(forKey: StorageKey.onboardingVersion) < OnboardingController.currentVersion {
+            showOnboarding()
+        } else {
+            startDesktopExperience(requestPermission: false)
+        }
     }
 
     private func configureStatusItem() {
@@ -71,16 +82,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let menu = NSMenu()
         menu.delegate = self
 
-        amountMenuItem = NSMenuItem(title: "今日金额：0.00", action: nil, keyEquivalent: "")
+        amountMenuItem = NSMenuItem(title: "今日键盘金额：0.00", action: nil, keyEquivalent: "")
         amountMenuItem.isEnabled = false
         menu.addItem(amountMenuItem)
+
+        mouseAmountMenuItem = NSMenuItem(title: "今日鼠标金额：0.00", action: nil, keyEquivalent: "")
+        mouseAmountMenuItem.isEnabled = false
+        menu.addItem(mouseAmountMenuItem)
 
         inputStatusMenuItem = NSMenuItem(title: "输入监听：等待授权", action: nil, keyEquivalent: "")
         inputStatusMenuItem.isEnabled = false
         menu.addItem(inputStatusMenuItem)
         menu.addItem(.separator())
 
-        let incrementItem = NSMenuItem(title: "每次按键增加", action: nil, keyEquivalent: "")
+        let incrementItem = NSMenuItem(title: "金额增量", action: nil, keyEquivalent: "")
         let incrementMenu = NSMenu()
         incrementSummaryMenuItem = NSMenuItem(title: "当前：固定 0.01", action: nil, keyEquivalent: "")
         incrementSummaryMenuItem.isEnabled = false
@@ -107,14 +122,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         incrementItem.submenu = incrementMenu
         menu.addItem(incrementItem)
 
-        midnightResetMenuItem = NSMenuItem(title: "每天 0 点自动清零", action: #selector(toggleMidnightReset), keyEquivalent: "")
-        midnightResetMenuItem.target = self
-        menu.addItem(midnightResetMenuItem)
-
-        let clearItem = NSMenuItem(title: "立即清空金额…", action: #selector(clearAmount), keyEquivalent: "")
-        clearItem.target = self
-        menu.addItem(clearItem)
-        menu.addItem(.separator())
         let notesItem = NSMenuItem(title: "桌面便签", action: nil, keyEquivalent: "")
         let notesMenu = NSMenu()
         for kind in DesktopNoteKind.allCases {
@@ -125,13 +132,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         notesItem.submenu = notesMenu
         menu.addItem(notesItem)
-        menu.addItem(withTitle: "重新检查权限并启动", action: #selector(retryInputMonitoring), keyEquivalent: "r").target = self
-        menu.addItem(withTitle: "打开“输入监控”设置", action: #selector(openInputSettings), keyEquivalent: "") .target = self
-        menu.addItem(withTitle: "刷新桌面窗口", action: #selector(screensChanged), keyEquivalent: "") .target = self
-        menu.addItem(withTitle: "重新应用系统壁纸", action: #selector(reapplyNativeWallpaper), keyEquivalent: "") .target = self
+
+        let clearItem = NSMenuItem(title: "立即清空金额…", action: #selector(clearAmount), keyEquivalent: "")
+        clearItem.target = self
+        menu.addItem(clearItem)
+        menu.addItem(.separator())
+
+        let settingsItem = NSMenuItem(title: "设置", action: nil, keyEquivalent: "")
+        let settingsMenu = NSMenu()
+
+        midnightResetMenuItem = NSMenuItem(title: "每天 0 点自动清零", action: #selector(toggleMidnightReset), keyEquivalent: "")
+        midnightResetMenuItem.target = self
+        settingsMenu.addItem(midnightResetMenuItem)
+
+        let inputItem = NSMenuItem(title: "输入监控", action: nil, keyEquivalent: "")
+        let inputMenu = NSMenu()
+        inputMenu.addItem(withTitle: "重新检查并启动", action: #selector(retryInputMonitoring), keyEquivalent: "r").target = self
+        inputMenu.addItem(withTitle: "打开系统设置…", action: #selector(openInputSettings), keyEquivalent: "").target = self
+        inputItem.submenu = inputMenu
+        settingsMenu.addItem(inputItem)
+
+        let displayItem = NSMenuItem(title: "显示与壁纸", action: nil, keyEquivalent: "")
+        let displayMenu = NSMenu()
         nativeWallpaperStatusMenuItem = NSMenuItem(title: nativeWallpaperStatus, action: nil, keyEquivalent: "")
         nativeWallpaperStatusMenuItem.isEnabled = false
-        menu.addItem(nativeWallpaperStatusMenuItem)
+        displayMenu.addItem(nativeWallpaperStatusMenuItem)
+        displayMenu.addItem(.separator())
+        displayMenu.addItem(withTitle: "刷新桌面窗口", action: #selector(screensChanged), keyEquivalent: "").target = self
+        displayMenu.addItem(withTitle: "重新应用系统壁纸", action: #selector(reapplyNativeWallpaper), keyEquivalent: "").target = self
+        displayItem.submenu = displayMenu
+        settingsMenu.addItem(displayItem)
+
+        settingsMenu.addItem(.separator())
+        settingsMenu.addItem(withTitle: "重新查看使用引导…", action: #selector(reopenOnboarding), keyEquivalent: "").target = self
+        settingsItem.submenu = settingsMenu
+        menu.addItem(settingsItem)
+
         menu.addItem(.separator())
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
         let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "—"
@@ -148,7 +184,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func updateMenuState() {
-        amountMenuItem?.title = "今日金额：\(keyboardState.amountText)"
+        amountMenuItem?.title = "今日键盘金额：\(keyboardState.amountText)"
+        mouseAmountMenuItem?.title = "今日鼠标金额：\(keyboardState.mouseAmountText)"
         inputStatusMenuItem?.title = inputMonitor?.isRunning == true ? "输入监听：已启用" : "输入监听：等待授权"
         incrementSummaryMenuItem?.title = "当前：\(keyboardState.incrementDescription)"
         midnightResetMenuItem?.state = keyboardState.resetsAtMidnight ? .on : .off
@@ -159,10 +196,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    private func startInputMonitoring(requestPermission: Bool) {
+    @discardableResult
+    private func startInputMonitoring(requestPermission: Bool) -> Bool {
         let started = inputMonitor.start(requestPermission: requestPermission)
         keyboardState.hasInputPermission = started
         updateMenuState()
+        return started
+    }
+
+    private func startDesktopExperience(requestPermission: Bool) {
+        desktopExperienceStarted = true
+        applyNativeWallpaper(showError: false)
+        wallpaperController.rebuildWindows()
+        startInputMonitoring(requestPermission: requestPermission)
+    }
+
+    private func showOnboarding() {
+        if onboardingController == nil {
+            onboardingController = OnboardingController(
+                requestPermission: { [weak self] in
+                    self?.startInputMonitoring(requestPermission: true) ?? false
+                },
+                permissionGranted: { [weak self] in
+                    _ = self?.startInputMonitoring(requestPermission: false)
+                },
+                openInputSettings: {
+                    guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent") else { return }
+                    NSWorkspace.shared.open(url)
+                },
+                finish: { [weak self] applyWallpaper in
+                    guard let self else { return }
+                    UserDefaults.standard.set(OnboardingController.currentVersion, forKey: StorageKey.onboardingVersion)
+                    if applyWallpaper {
+                        startDesktopExperience(requestPermission: false)
+                    } else {
+                        nativeWallpaperStatus = "系统壁纸：尚未设置"
+                        nativeWallpaperStatusMenuItem?.title = nativeWallpaperStatus
+                    }
+                }
+            )
+        }
+        onboardingController?.show()
     }
 
     @objc private func selectFixedPreset(_ sender: NSMenuItem) {
@@ -181,7 +255,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let alert = NSAlert()
         alert.messageText = "设置固定增加金额"
-        alert.informativeText = "每次按键增加多少金额，最低为 0.01。"
+        alert.informativeText = "每次键盘按键或鼠标点击增加多少金额，最低为 0.01。"
         alert.accessoryView = field
         alert.addButton(withTitle: "保存")
         alert.addButton(withTitle: "取消")
@@ -213,7 +287,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let alert = NSAlert()
         alert.messageText = "设置随机增加范围"
-        alert.informativeText = "每次按键会在 0.01～1.00 之间随机增加，精确到 0.01。"
+        alert.informativeText = "每次键盘按键或鼠标点击会在 0.01～1.00 之间随机增加，精确到 0.01。"
         alert.accessoryView = grid
         alert.addButton(withTitle: "保存")
         alert.addButton(withTitle: "取消")
@@ -243,7 +317,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let alert = NSAlert()
         alert.messageText = "清空当前金额？"
-        alert.informativeText = "收银机金额将立即变为 0.00。"
+        alert.informativeText = "键盘和鼠标累计金额都将立即变为 0.00。"
         alert.alertStyle = .warning
         alert.addButton(withTitle: "清空")
         alert.addButton(withTitle: "取消")
@@ -286,12 +360,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func screensChanged() {
+        guard desktopExperienceStarted else { return }
         applyNativeWallpaper(showError: false)
         wallpaperController.rebuildWindows()
     }
 
     @objc private func reapplyNativeWallpaper() {
         applyNativeWallpaper(showError: true)
+    }
+
+    @objc private func reopenOnboarding() {
+        showOnboarding()
     }
 
     private func applyNativeWallpaper(showError: Bool) {

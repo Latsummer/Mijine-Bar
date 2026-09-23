@@ -4,7 +4,7 @@ import Foundation
 
 final class InputMonitor {
     typealias Handler = (_ keyCode: Int, _ isDown: Bool, _ shouldCount: Bool) -> Void
-    typealias MouseHandler = (_ location: CGPoint) -> Void
+    typealias MouseHandler = (_ location: CGPoint, _ buttonNumber: Int) -> Void
 
     private let handler: Handler
     private let mouseHandler: MouseHandler?
@@ -35,7 +35,10 @@ final class InputMonitor {
             return false
         }
 
-        let interestedEvents = [CGEventType.keyDown, .keyUp, .flagsChanged, .leftMouseDown]
+        let interestedEvents = [
+            CGEventType.keyDown, .keyUp, .flagsChanged,
+            .leftMouseDown, .rightMouseDown, .otherMouseDown
+        ]
         let mask = interestedEvents.reduce(CGEventMask(0)) { partial, type in
             partial | (CGEventMask(1) << type.rawValue)
         }
@@ -51,11 +54,12 @@ final class InputMonitor {
                 return Unmanaged.passUnretained(event)
             }
 
-            if type == .leftMouseDown {
+            if type == .leftMouseDown || type == .rightMouseDown || type == .otherMouseDown {
                 // CGEvent uses a top-left origin; Cocoa's mouse location already
                 // matches the bottom-left screen coordinates used by NSWindow.
+                let buttonNumber = Int(event.getIntegerValueField(.mouseEventButtonNumber))
                 DispatchQueue.main.async {
-                    monitor.mouseHandler?(NSEvent.mouseLocation)
+                    monitor.mouseHandler?(NSEvent.mouseLocation, buttonNumber)
                 }
                 return Unmanaged.passUnretained(event)
             }

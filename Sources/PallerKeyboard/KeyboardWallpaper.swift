@@ -1,5 +1,6 @@
 import AppKit
 import CoreGraphics
+import QuartzCore
 
 @MainActor
 final class KeyboardState {
@@ -11,6 +12,8 @@ final class KeyboardState {
     private enum StorageKey {
         static let day = "dailyCounter.day"
         static let cents = "dailyCounter.cents"
+        static let mouseCents = "dailyCounter.mouseCents"
+        static let legacyMouseClicks = "dailyCounter.mouseClicks"
         static let incrementMode = "dailyCounter.incrementMode"
         static let fixedIncrementCents = "dailyCounter.fixedIncrementCents"
         static let randomMinimumCents = "dailyCounter.randomMinimumCents"
@@ -25,7 +28,9 @@ final class KeyboardState {
     private var lastDayCheck = Date.distantPast
 
     private(set) var dailyCents = 0
+    private(set) var dailyMouseCents = 0
     private(set) var displayPulse: CGFloat = 0
+    private(set) var mouseDisplayPulse: CGFloat = 0
     private(set) var incrementMode: IncrementMode = .fixed
     private(set) var fixedIncrementCents = 1
     private(set) var randomMinimumCents = 1
@@ -47,6 +52,10 @@ final class KeyboardState {
 
     var amountText: String {
         String(format: "%.2f", Double(dailyCents) / 100.0)
+    }
+
+    var mouseAmountText: String {
+        String(format: "%.2f", Double(dailyMouseCents) / 100.0)
     }
 
     var incrementDescription: String {
@@ -87,6 +96,15 @@ final class KeyboardState {
         notifyObservers()
     }
 
+    func recordMouseClick() {
+        refreshDayIfNeeded()
+        let result = dailyMouseCents.addingReportingOverflow(nextIncrement())
+        dailyMouseCents = result.overflow ? Int.max : result.partialValue
+        mouseDisplayPulse = 1
+        persist()
+        notifyObservers()
+    }
+
     func advanceAnimation() {
         var changed = false
         if displayPulse > 0.01 {
@@ -94,6 +112,14 @@ final class KeyboardState {
             changed = true
         } else if displayPulse != 0 {
             displayPulse = 0
+            changed = true
+        }
+
+        if mouseDisplayPulse > 0.01 {
+            mouseDisplayPulse *= 0.88
+            changed = true
+        } else if mouseDisplayPulse != 0 {
+            mouseDisplayPulse = 0
             changed = true
         }
 
@@ -125,7 +151,9 @@ final class KeyboardState {
 
     func resetAmount() {
         dailyCents = 0
+        dailyMouseCents = 0
         displayPulse = 1
+        mouseDisplayPulse = 1
         persist()
         notifyObservers()
     }
@@ -151,9 +179,17 @@ final class KeyboardState {
         storedDay = defaults.string(forKey: StorageKey.day) ?? ""
         if storedDay == today {
             dailyCents = defaults.integer(forKey: StorageKey.cents)
+            if defaults.object(forKey: StorageKey.mouseCents) != nil {
+                dailyMouseCents = defaults.integer(forKey: StorageKey.mouseCents)
+            } else {
+                // Migrate builds that briefly stored a raw click count. Each old
+                // click becomes the default one-cent mouse amount.
+                dailyMouseCents = defaults.integer(forKey: StorageKey.legacyMouseClicks)
+            }
         } else {
             storedDay = today
             dailyCents = 0
+            dailyMouseCents = 0
             persist()
         }
         lastDayCheck = Date()
@@ -168,7 +204,9 @@ final class KeyboardState {
         storedDay = today
         if resetsAtMidnight {
             dailyCents = 0
+            dailyMouseCents = 0
             displayPulse = 1
+            mouseDisplayPulse = 1
         }
         persist()
         return true
@@ -177,6 +215,7 @@ final class KeyboardState {
     private func persist() {
         defaults.set(storedDay, forKey: StorageKey.day)
         defaults.set(dailyCents, forKey: StorageKey.cents)
+        defaults.set(dailyMouseCents, forKey: StorageKey.mouseCents)
     }
 
     private static func dayIdentifier(for date: Date) -> String {
@@ -188,9 +227,18 @@ final class KeyboardState {
         String(format: "%.2f", Double(cents) / 100.0)
     }
 
+    private func nextIncrement() -> Int {
+        switch incrementMode {
+        case .fixed:
+            fixedIncrementCents
+        case .random:
+            Int.random(in: randomMinimumCents...randomMaximumCents)
+        }
+    }
+
     private func notifyObservers() {
         observers.removeAll { $0.value == nil }
-        observers.forEach { $0.value?.needsDisplay = true }
+        observers.forEach { $0.value?.stateDidChange() }
     }
 }
 
@@ -210,6 +258,254 @@ private extension NSPoint {
             x: x + (target.x - x) * factor,
             y: y + (target.y - y) * factor
         )
+    }
+}
+
+/// Each bubble owns only a tiny transparent window. Moving these windows avoids
+/// making WindowServer composite a screen-sized transparent surface every frame.
+@MainActor
+private final class BubbleOverlayController {
+    private final class Particle {
+        let window: NSWindow
+        let radius: CGFloat
+        let baseX: CGFloat
+        var y: CGFloat
+        let riseSpeed: CGFloat
+        let drift: CGFloat
+        let driftSpeed: CGFloat
+        var phase: CGFloat
+
+        init(window: NSWindow, radius: CGFloat, baseX: CGFloat, y: CGFloat, riseSpeed: CGFloat, drift: CGFloat, driftSpeed: CGFloat, phase: CGFloat) {
+            self.window = window
+            self.radius = radius
+            self.baseX = baseX
+            self.y = y
+            self.riseSpeed = riseSpeed
+            self.drift = drift
+            self.driftSpeed = driftSpeed
+            self.phase = phase
+        }
+    }
+
+    private let screen: NSScreen
+    private weak var wallpaperWindow: NSWindow?
+    private var particles: [Particle] = []
+    private var timer: Timer?
+    private var enabled = false
+    private var nextSpawn = Date()
+    private var lastUpdate = Date()
+    private let maximumBubbleCount = 18
+
+    init(screen: NSScreen, wallpaperWindow: NSWindow) {
+        self.screen = screen
+        self.wallpaperWindow = wallpaperWindow
+    }
+
+    deinit { timer?.invalidate() }
+
+    func setEnabled(_ newValue: Bool) {
+        guard newValue != enabled else { return }
+        enabled = newValue
+        timer?.invalidate()
+        timer = nil
+
+        if newValue {
+            lastUpdate = Date()
+            nextSpawn = lastUpdate
+            let timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 12.0, repeats: true) { [weak self] _ in
+                Task { @MainActor in self?.update() }
+            }
+            timer.tolerance = 0.025
+            self.timer = timer
+        } else {
+            particles.forEach { $0.window.orderOut(nil) }
+            particles.removeAll()
+        }
+    }
+
+    private func update() {
+        let now = Date()
+        let delta = CGFloat(min(0.15, max(0, now.timeIntervalSince(lastUpdate))))
+        lastUpdate = now
+
+        if now >= nextSpawn, particles.count < maximumBubbleCount {
+            spawnBubble()
+            nextSpawn = now.addingTimeInterval(Double.random(in: 0.28...0.72))
+        }
+
+        for particle in particles {
+            particle.y += particle.riseSpeed * delta
+            particle.phase += particle.driftSpeed * delta
+            let localX = particle.baseX + sin(particle.phase) * particle.drift
+            particle.window.setFrameOrigin(NSPoint(
+                x: screen.frame.minX + localX - particle.radius,
+                y: screen.frame.minY + particle.y - particle.radius
+            ))
+        }
+
+        particles.removeAll { particle in
+            guard particle.y - particle.radius > screen.frame.height else { return false }
+            particle.window.orderOut(nil)
+            return true
+        }
+    }
+
+    private func spawnBubble() {
+        let radius = CGFloat.random(in: 5...22)
+        let diameter = radius * 2 + 4
+        let baseX = CGFloat.random(in: radius...max(radius, screen.frame.width - radius))
+        let opacity = CGFloat.random(in: 0.36...0.70)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: diameter, height: diameter),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.level = wallpaperWindow?.level ?? NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopWindow)) + 1)
+        window.collectionBehavior = [.canJoinAllSpaces, .ignoresCycle, .fullScreenAuxiliary, .stationary]
+        window.animationBehavior = .none
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = false
+        window.ignoresMouseEvents = true
+        window.canHide = false
+        window.hidesOnDeactivate = false
+
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: diameter, height: diameter))
+        content.wantsLayer = true
+        let bubble = CAShapeLayer()
+        bubble.frame = content.bounds
+        bubble.path = CGPath(ellipseIn: content.bounds.insetBy(dx: 2, dy: 2), transform: nil)
+        bubble.fillColor = NSColor(calibratedRed: 0.58, green: 0.91, blue: 1, alpha: opacity * 0.24).cgColor
+        bubble.strokeColor = NSColor(calibratedRed: 0.88, green: 0.98, blue: 1, alpha: opacity).cgColor
+        bubble.lineWidth = max(1.2, radius * 0.12)
+        content.layer?.addSublayer(bubble)
+
+        let highlight = CAShapeLayer()
+        let highlightSize = max(2, radius * 0.32)
+        highlight.path = CGPath(ellipseIn: CGRect(x: radius * 0.48, y: radius * 1.18, width: highlightSize, height: highlightSize * 0.62), transform: nil)
+        highlight.fillColor = NSColor.white.withAlphaComponent(min(1, opacity * 0.95)).cgColor
+        content.layer?.addSublayer(highlight)
+        window.contentView = content
+        window.setFrameOrigin(NSPoint(x: screen.frame.minX + baseX - radius, y: screen.frame.minY - radius))
+        if let wallpaperWindow {
+            window.order(.above, relativeTo: wallpaperWindow.windowNumber)
+        } else {
+            window.orderFrontRegardless()
+        }
+
+        particles.append(Particle(
+            window: window,
+            radius: radius,
+            baseX: baseX,
+            y: -radius,
+            riseSpeed: CGFloat.random(in: 38...78),
+            drift: CGFloat.random(in: 8...28),
+            driftSpeed: CGFloat.random(in: 0.7...1.7),
+            phase: CGFloat.random(in: 0...(2 * .pi))
+        ))
+    }
+}
+
+/// Layer-only bubble renderer. It must be a sibling of the expensive wallpaper
+/// view (not its child), otherwise AppKit may invalidate the wallpaper backing.
+@MainActor
+private final class BubbleLayerView: NSView {
+    private var timer: Timer?
+    private var enabled = false
+    private var generation = UUID()
+    private var activeCount = 0
+    private let maximumCount = 18
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.clear.cgColor
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    deinit { timer?.invalidate() }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    func setEnabled(_ value: Bool) {
+        guard value != enabled else { return }
+        enabled = value
+        generation = UUID()
+        timer?.invalidate()
+        timer = nil
+        if value {
+            spawn()
+            scheduleSpawn()
+        } else {
+            layer?.sublayers?.forEach { $0.removeFromSuperlayer() }
+            activeCount = 0
+        }
+    }
+
+    private func scheduleSpawn() {
+        guard enabled else { return }
+        timer = Timer.scheduledTimer(withTimeInterval: Double.random(in: 0.32...0.78), repeats: false) { [weak self] _ in
+            Task { @MainActor in
+                self?.spawn()
+                self?.scheduleSpawn()
+            }
+        }
+        timer?.tolerance = 0.15
+    }
+
+    private func spawn() {
+        guard enabled, activeCount < maximumCount, bounds.width > 0, bounds.height > 0, let layer else { return }
+        let radius = CGFloat.random(in: 6...22)
+        let diameter = radius * 2
+        let opacity = CGFloat.random(in: 0.40...0.72)
+        let startX = CGFloat.random(in: radius...max(radius, bounds.width - radius))
+        let startY = -radius
+        let endY = bounds.height + radius
+        let duration = CFTimeInterval((endY - startY) / CGFloat.random(in: 38...72))
+        let drift = CGFloat.random(in: 10...30)
+
+        let shape = CAShapeLayer()
+        shape.bounds = CGRect(x: 0, y: 0, width: diameter, height: diameter)
+        shape.position = CGPoint(x: startX, y: startY)
+        shape.path = CGPath(ellipseIn: shape.bounds.insetBy(dx: 1, dy: 1), transform: nil)
+        shape.fillColor = NSColor(calibratedRed: 0.58, green: 0.91, blue: 1, alpha: opacity * 0.24).cgColor
+        shape.strokeColor = NSColor(calibratedRed: 0.88, green: 0.98, blue: 1, alpha: opacity).cgColor
+        shape.lineWidth = max(1.2, radius * 0.12)
+
+        let highlight = CAShapeLayer()
+        let h = max(2, radius * 0.32)
+        highlight.path = CGPath(ellipseIn: CGRect(x: radius * 0.42, y: radius * 1.18, width: h, height: h * 0.62), transform: nil)
+        highlight.fillColor = NSColor.white.withAlphaComponent(min(1, opacity * 0.95)).cgColor
+        shape.addSublayer(highlight)
+
+        let path = CGMutablePath()
+        path.move(to: CGPoint(x: startX, y: startY))
+        for index in 1...5 {
+            let x = startX + (index.isMultiple(of: 2) ? -drift : drift)
+            path.addLine(to: CGPoint(x: min(bounds.width - radius, max(radius, x)), y: startY + (endY - startY) * CGFloat(index) / 5))
+        }
+        let position = CAKeyframeAnimation(keyPath: "position")
+        position.path = path
+        position.calculationMode = .cubic
+        position.timingFunction = CAMediaTimingFunction(name: .linear)
+        let fade = CAKeyframeAnimation(keyPath: "opacity")
+        fade.values = [0, 1, 1, 0]
+        fade.keyTimes = [0, 0.06, 0.90, 1]
+        let group = CAAnimationGroup()
+        group.animations = [position, fade]
+        group.duration = duration
+        group.fillMode = .forwards
+        group.isRemovedOnCompletion = false
+
+        let token = generation
+        activeCount += 1
+        layer.addSublayer(shape)
+        shape.add(group, forKey: "bubble")
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self, weak shape] in
+            shape?.removeFromSuperlayer()
+            guard let self, self.generation == token else { return }
+            self.activeCount = max(0, self.activeCount - 1)
+        }
     }
 }
 
@@ -357,7 +653,7 @@ final class KeyboardWallpaperView: NSView {
         }
         super.init(frame: frameRect)
         state.addObserver(self)
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 50.0, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.advanceAnimation() }
         }
     }
@@ -391,8 +687,13 @@ final class KeyboardWallpaperView: NSView {
         )
         drawNoteAffordances(in: imageRect)
         drawFollowingEyes(in: imageRect)
+        drawMouseClicks(in: imageRect)
         drawAmount(in: imageRect)
         drawPermissionMessageIfNeeded()
+    }
+
+    func stateDidChange() {
+        needsDisplay = true
     }
 
     private func aspectFillRect(imageSize: NSSize, container: NSRect) -> NSRect {
@@ -553,10 +854,33 @@ final class KeyboardWallpaperView: NSView {
         screenPath.stroke()
 
         let inset = displayRect.insetBy(dx: displayRect.width * 0.035, dy: displayRect.height * 0.13)
-        drawSevenSegmentText(state.amountText, in: inset)
+        drawSevenSegmentText(state.amountText, in: inset, pulse: state.displayPulse)
     }
 
-    private func drawSevenSegmentText(_ text: String, in rect: NSRect) {
+    private func drawMouseClicks(in imageRect: NSRect) {
+        // The smaller customer-facing display above the main register screen.
+        let displayRect = NSRect(
+            x: imageRect.minX + imageRect.width * (1978.0 / 3840.0),
+            y: imageRect.minY + imageRect.height * ((2160.0 - 1062.0) / 2160.0),
+            width: imageRect.width * (176.0 / 3840.0),
+            height: imageRect.height * (56.0 / 2160.0)
+        )
+
+        NSColor(calibratedRed: 0.003, green: 0.012, blue: 0.013, alpha: 1).setFill()
+        NSBezierPath(
+            roundedRect: displayRect,
+            xRadius: displayRect.height * 0.05,
+            yRadius: displayRect.height * 0.05
+        ).fill()
+
+        let inset = displayRect.insetBy(dx: displayRect.width * 0.07, dy: displayRect.height * 0.14)
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(roundedRect: displayRect.insetBy(dx: 2, dy: 2), xRadius: 2, yRadius: 2).addClip()
+        drawSevenSegmentText(state.mouseAmountText, in: inset, pulse: state.mouseDisplayPulse)
+        NSGraphicsContext.restoreGraphicsState()
+    }
+
+    private func drawSevenSegmentText(_ text: String, in rect: NSRect, pulse: CGFloat) {
         let digitCount = CGFloat(text.filter(\.isNumber).count)
         let dotCount = CGFloat(text.filter { $0 == "." }.count)
         let digitUnit: CGFloat = 0.52
@@ -571,7 +895,6 @@ final class KeyboardWallpaperView: NSView {
         var x = rect.maxX - totalWidth
         let y = rect.midY - digitHeight / 2
 
-        let pulse = state.displayPulse
         let color = NSColor(
             calibratedRed: 0.50 + 0.22 * pulse,
             green: 1,

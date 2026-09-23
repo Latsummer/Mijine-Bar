@@ -33,7 +33,7 @@ enum DesktopNoteKind: String, CaseIterable {
 
     var cardHeight: CGFloat {
         switch self {
-        case .daily: 400
+        case .daily: 350
         case .plan, .memo: 315
         }
     }
@@ -275,6 +275,7 @@ final class DesktopNoteController: NSObject, NSWindowDelegate {
         // surface above them. Raise only the expanded card to a normal app
         // window so its fields, menus and buttons receive real input.
         panel.level = .normal
+        panel.hasShadow = true
         let card = NoteCardView(
             kind: kind,
             store: store,
@@ -298,6 +299,7 @@ final class DesktopNoteController: NSObject, NSWindowDelegate {
         state.isEditingNote = false
         isExpanded = false
         panel.level = Self.desktopNoteLevel
+        panel.hasShadow = false
         panel.setFrame(compactFrame, display: true, animate: true)
         installHotspot()
         panel.orderFrontRegardless()
@@ -376,8 +378,8 @@ private final class NoteCardView: NSView, NSTextViewDelegate {
     private let kind: DesktopNoteKind
     private let store: NotesStore
     private let titleLabel = NSTextField(labelWithString: "")
-    private let pinButton = NSButton(title: "固定展开", target: nil, action: nil)
-    private let closeButton = NSButton(title: "收起", target: nil, action: nil)
+    private let pinButton = NSButton()
+    private let closeButton = NSButton()
     private let helperLabel = NSTextField(labelWithString: "")
     private let onClose: () -> Void
     private let onPinnedChanged: (Bool) -> Void
@@ -400,25 +402,24 @@ private final class NoteCardView: NSView, NSTextViewDelegate {
         super.init(frame: .zero)
         wantsLayer = true
 
-        titleLabel.stringValue = kind.title
-        titleLabel.font = .systemFont(ofSize: 15, weight: .bold)
-        titleLabel.textColor = NSColor(calibratedWhite: 0.12, alpha: 1)
+        titleLabel.stringValue = kind == .daily ? "GALLEY GRUB  ·  今日订单" : "GALLEY GRUB  ·  \(kind.title)"
+        titleLabel.font = NSFont(name: "Avenir Next Condensed Demi Bold", size: 16)
+            ?? .systemFont(ofSize: 16, weight: .heavy)
+        titleLabel.textColor = NSColor(calibratedRed: 1.00, green: 0.96, blue: 0.76, alpha: 1)
         addSubview(titleLabel)
 
-        pinButton.bezelStyle = .rounded
-        pinButton.font = .systemFont(ofSize: 11, weight: .medium)
+        configureHeaderButton(pinButton, symbol: "pin", help: "固定在桌面")
         pinButton.target = self
         pinButton.action = #selector(togglePinned)
         addSubview(pinButton)
 
-        closeButton.bezelStyle = .rounded
-        closeButton.font = .systemFont(ofSize: 11, weight: .medium)
+        configureHeaderButton(closeButton, symbol: "chevron.up", help: "收起订单")
         closeButton.target = self
         closeButton.action = #selector(close)
         addSubview(closeButton)
 
-        helperLabel.font = .systemFont(ofSize: 11)
-        helperLabel.textColor = NSColor(calibratedWhite: 0.25, alpha: 1)
+        helperLabel.font = .systemFont(ofSize: 11, weight: .medium)
+        helperLabel.textColor = NSColor(calibratedRed: 0.31, green: 0.25, blue: 0.15, alpha: 0.78)
         addSubview(helperLabel)
 
         switch kind {
@@ -431,33 +432,67 @@ private final class NoteCardView: NSView, NSTextViewDelegate {
     required init?(coder: NSCoder) { fatalError("init(coder:)") }
 
     override func draw(_ dirtyRect: NSRect) {
-        NSColor(calibratedRed: 0.91, green: 0.98, blue: 0.82, alpha: 0.98).setFill()
-        NSBezierPath(roundedRect: bounds, xRadius: 16, yRadius: 16).fill()
-        NSColor(calibratedRed: 0.10, green: 0.25, blue: 0.12, alpha: 0.72).setStroke()
-        let outline = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 15, yRadius: 15)
-        outline.lineWidth = 2
-        outline.stroke()
+        let paper = NSBezierPath(roundedRect: bounds.insetBy(dx: 2, dy: 2), xRadius: 9, yRadius: 9)
+        NSColor(calibratedRed: 1.00, green: 0.95, blue: 0.76, alpha: 0.99).setFill()
+        paper.fill()
+
+        NSColor(calibratedRed: 0.12, green: 0.18, blue: 0.10, alpha: 0.95).setStroke()
+        paper.lineWidth = 4
+        paper.stroke()
+        let innerOutline = NSBezierPath(roundedRect: bounds.insetBy(dx: 6, dy: 6), xRadius: 6, yRadius: 6)
+        NSColor(calibratedRed: 0.45, green: 0.31, blue: 0.13, alpha: 0.38).setStroke()
+        innerOutline.lineWidth = 1.5
+        innerOutline.stroke()
+
+        let headerRect = NSRect(x: 3, y: bounds.maxY - 52, width: bounds.width - 6, height: 49)
+        let header = NSBezierPath(roundedRect: headerRect, xRadius: 7, yRadius: 7)
+        NSColor(calibratedRed: 0.12, green: 0.34, blue: 0.20, alpha: 1).setFill()
+        header.fill()
+        NSColor(calibratedRed: 0.04, green: 0.12, blue: 0.07, alpha: 0.95).setStroke()
+        header.lineWidth = 2.5
+        header.stroke()
+
+        for x in [CGFloat(16), bounds.width - 16] {
+            let rivet = NSRect(x: x - 3, y: bounds.maxY - 31, width: 6, height: 6)
+            NSColor(calibratedRed: 0.80, green: 0.72, blue: 0.46, alpha: 1).setFill()
+            NSBezierPath(ovalIn: rivet).fill()
+            NSColor(calibratedRed: 0.19, green: 0.20, blue: 0.13, alpha: 0.8).setStroke()
+            NSBezierPath(ovalIn: rivet).stroke()
+        }
+
+        if kind == .daily {
+            NSColor(calibratedRed: 0.46, green: 0.34, blue: 0.19, alpha: 0.12).setStroke()
+            let lines = NSBezierPath()
+            var y = bounds.maxY - 91
+            while y > 62 {
+                lines.move(to: NSPoint(x: 18, y: y))
+                lines.line(to: NSPoint(x: bounds.maxX - 18, y: y))
+                y -= 37
+            }
+            lines.lineWidth = 1
+            lines.stroke()
+        }
     }
 
     override func layout() {
         super.layout()
         let top = bounds.maxY
-        titleLabel.frame = NSRect(x: 18, y: top - 34, width: max(80, bounds.width - 190), height: 20)
-        closeButton.frame = NSRect(x: bounds.maxX - 58, y: top - 36, width: 42, height: 24)
-        pinButton.frame = NSRect(x: bounds.maxX - 148, y: top - 36, width: 84, height: 24)
+        titleLabel.frame = NSRect(x: 28, y: top - 36, width: max(80, bounds.width - 112), height: 22)
+        closeButton.frame = NSRect(x: bounds.maxX - 40, y: top - 39, width: 27, height: 27)
+        pinButton.frame = NSRect(x: bounds.maxX - 72, y: top - 39, width: 27, height: 27)
 
         switch kind {
         case .daily:
-            taskScrollView?.frame = NSRect(x: 14, y: 108, width: bounds.width - 28, height: max(70, bounds.height - 159))
+            taskScrollView?.frame = NSRect(x: 16, y: 88, width: bounds.width - 32, height: max(70, bounds.height - 148))
             if let scroll = taskScrollView {
                 taskListView?.setViewportWidth(scroll.contentSize.width)
             }
-            taskField?.frame = NSRect(x: 14, y: 56, width: bounds.width - 28, height: 42)
-            lifetimePicker?.frame = NSRect(x: 14, y: 18, width: bounds.width - 102, height: 29)
-            addTaskButton?.frame = NSRect(x: bounds.width - 80, y: 18, width: 66, height: 29)
+            taskField?.frame = NSRect(x: 16, y: 46, width: bounds.width - 125, height: 31)
+            lifetimePicker?.frame = NSRect(x: bounds.width - 103, y: 46, width: 87, height: 31)
+            addTaskButton?.frame = NSRect(x: 16, y: 12, width: bounds.width - 32, height: 28)
         case .plan, .memo:
             helperLabel.frame = NSRect(x: 18, y: 15, width: bounds.width - 36, height: 17)
-            textScrollView?.frame = NSRect(x: 14, y: 39, width: bounds.width - 28, height: max(80, bounds.height - 88))
+            textScrollView?.frame = NSRect(x: 14, y: 38, width: bounds.width - 28, height: max(80, bounds.height - 98))
         }
     }
 
@@ -467,8 +502,23 @@ private final class NoteCardView: NSView, NSTextViewDelegate {
 
     func setPinned(_ pinned: Bool) {
         self.pinned = pinned
-        pinButton.title = pinned ? "已固定" : "固定展开"
+        pinButton.image = NSImage(
+            systemSymbolName: pinned ? "pin.fill" : "pin",
+            accessibilityDescription: pinned ? "已固定" : "固定在桌面"
+        )
         pinButton.state = pinned ? .on : .off
+        pinButton.contentTintColor = pinned
+            ? NSColor(calibratedRed: 1.00, green: 0.78, blue: 0.20, alpha: 1)
+            : NSColor(calibratedRed: 1.00, green: 0.96, blue: 0.76, alpha: 0.92)
+    }
+
+    private func configureHeaderButton(_ button: NSButton, symbol: String, help: String) {
+        button.title = ""
+        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: help)
+        button.imagePosition = .imageOnly
+        button.isBordered = false
+        button.contentTintColor = NSColor(calibratedRed: 1.00, green: 0.96, blue: 0.76, alpha: 0.92)
+        button.toolTip = help
     }
 
     private func configureDaily() {
@@ -490,11 +540,17 @@ private final class NoteCardView: NSView, NSTextViewDelegate {
         list.reload(store.visibleDailyTasks)
 
         let field = NSTextField()
-        field.placeholderString = "添加一件每天要做的事"
-        field.font = .systemFont(ofSize: 12)
-        field.usesSingleLineMode = false
-        field.cell?.wraps = true
-        field.cell?.lineBreakMode = .byWordWrapping
+        field.placeholderString = "新订单：写下一件要做的事"
+        field.font = .systemFont(ofSize: 12, weight: .medium)
+        field.usesSingleLineMode = true
+        field.isBezeled = false
+        field.drawsBackground = true
+        field.backgroundColor = NSColor.white.withAlphaComponent(0.58)
+        field.textColor = NSColor(calibratedRed: 0.17, green: 0.16, blue: 0.10, alpha: 1)
+        field.wantsLayer = true
+        field.layer?.cornerRadius = 6
+        field.layer?.borderWidth = 1.5
+        field.layer?.borderColor = NSColor(calibratedRed: 0.36, green: 0.30, blue: 0.17, alpha: 0.35).cgColor
         field.target = self
         field.action = #selector(addTask)
         addSubview(field)
@@ -503,19 +559,25 @@ private final class NoteCardView: NSView, NSTextViewDelegate {
         let picker = NSPopUpButton()
         picker.addItems(withTitles: [NotesStore.Lifetime.persistent.label, NotesStore.Lifetime.todayOnly.label])
         picker.font = .systemFont(ofSize: 11)
+        picker.bezelStyle = .recessed
+        picker.contentTintColor = NSColor(calibratedRed: 0.13, green: 0.29, blue: 0.17, alpha: 1)
         addSubview(picker)
         lifetimePicker = picker
 
-        let add = NSButton(title: "添加", target: self, action: #selector(addTask))
-        add.bezelStyle = .rounded
+        let add = NSButton(title: "＋  加入今日订单", target: self, action: #selector(addTask))
+        add.isBordered = false
         add.font = .systemFont(ofSize: 12, weight: .semibold)
+        add.wantsLayer = true
+        add.layer?.cornerRadius = 6
+        add.layer?.backgroundColor = NSColor(calibratedRed: 0.15, green: 0.39, blue: 0.22, alpha: 1).cgColor
+        add.contentTintColor = NSColor(calibratedRed: 1.00, green: 0.96, blue: 0.76, alpha: 1)
         addSubview(add)
         addTaskButton = add
     }
 
     private func configureTextNote() {
         let scroll = NSScrollView()
-        scroll.borderType = .bezelBorder
+        scroll.borderType = .noBorder
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
         let text = NSTextView()
@@ -523,7 +585,7 @@ private final class NoteCardView: NSView, NSTextViewDelegate {
         text.allowsUndo = true
         text.font = .systemFont(ofSize: 13)
         text.textColor = NSColor(calibratedWhite: 0.12, alpha: 1)
-        text.backgroundColor = NSColor.white.withAlphaComponent(0.72)
+        text.backgroundColor = NSColor.white.withAlphaComponent(0.55)
         text.delegate = self
         text.string = kind == .plan ? store.planText : store.memoText
         scroll.documentView = text
@@ -626,22 +688,39 @@ private final class DailyTaskRowView: NSView {
         super.init(frame: .zero)
         checkbox.title = task.title
         checkbox.state = task.isComplete ? .on : .off
-        checkbox.font = .systemFont(ofSize: 12)
+        checkbox.font = .systemFont(ofSize: 13, weight: task.isComplete ? .regular : .medium)
+        checkbox.contentTintColor = NSColor(calibratedRed: 0.15, green: 0.42, blue: 0.22, alpha: 1)
+        if task.isComplete {
+            checkbox.attributedTitle = NSAttributedString(
+                string: task.title,
+                attributes: [
+                    .font: checkbox.font ?? NSFont.systemFont(ofSize: 13),
+                    .foregroundColor: NSColor(calibratedRed: 0.34, green: 0.31, blue: 0.22, alpha: 0.58),
+                    .strikethroughStyle: NSUnderlineStyle.single.rawValue
+                ]
+            )
+        }
         checkbox.lineBreakMode = .byWordWrapping
         checkbox.cell?.wraps = true
         checkbox.target = self
         checkbox.action = #selector(toggle)
         addSubview(checkbox)
 
-        lifetime.addItems(withTitles: ["长期", "当天"])
+        lifetime.addItems(withTitles: ["长期", "仅今天"])
         lifetime.font = .systemFont(ofSize: 10)
+        lifetime.bezelStyle = .recessed
+        lifetime.contentTintColor = NSColor(calibratedRed: 0.28, green: 0.24, blue: 0.14, alpha: 0.82)
         lifetime.selectItem(at: task.lifetime == .persistent ? 0 : 1)
         lifetime.target = self
         lifetime.action = #selector(changeLifetime)
         addSubview(lifetime)
 
-        remove.bezelStyle = .rounded
-        remove.font = .systemFont(ofSize: 14, weight: .medium)
+        remove.title = ""
+        remove.image = NSImage(systemSymbolName: "trash", accessibilityDescription: "删除订单")
+        remove.imagePosition = .imageOnly
+        remove.isBordered = false
+        remove.contentTintColor = NSColor(calibratedRed: 0.63, green: 0.20, blue: 0.15, alpha: 0.82)
+        remove.toolTip = "删除订单"
         remove.target = self
         remove.action = #selector(delete)
         addSubview(remove)
@@ -655,6 +734,16 @@ private final class DailyTaskRowView: NSView {
         remove.frame = NSRect(x: bounds.maxX - 27, y: controlY, width: 24, height: 25)
         lifetime.frame = NSRect(x: bounds.maxX - 88, y: controlY, width: 58, height: 24)
         checkbox.frame = NSRect(x: 0, y: 4, width: max(30, bounds.width - 93), height: bounds.height - 8)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        NSColor(calibratedRed: 0.40, green: 0.31, blue: 0.18, alpha: 0.16).setStroke()
+        let separator = NSBezierPath()
+        separator.move(to: NSPoint(x: 4, y: 0.5))
+        separator.line(to: NSPoint(x: bounds.maxX - 4, y: 0.5))
+        separator.lineWidth = 1
+        separator.stroke()
     }
 
     func preferredHeight(for width: CGFloat) -> CGFloat {
